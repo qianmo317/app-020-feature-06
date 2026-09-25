@@ -247,8 +247,15 @@ export function PrintPage({ floorId }: { floorId: string }) {
         <div className="sheet-foot">
           {result ? (
             <>
-              <span>校验结论：{result.pass ? '合规' : '存在不合规项'} · 疏散最远 {result.travelWorstM != null ? `${result.travelWorstM.toFixed(1)}m` : '—'}（限值 {result.rulesSnapshot.maxTravelDistanceM}m） · 规则 {result.rulesSnapshot.buildingKind} v{result.rulesSnapshot.version}</span>
-              <span>依据文号：{result.rulesSnapshot.source} ｜ 校验时间：{new Date(result.checkedAt).toLocaleString('zh-CN')}</span>
+              <span>
+                校验结论：{result.pass ? '合规' : '存在不合规项'} · 疏散最远 {result.travelWorstM != null ? `${result.travelWorstM.toFixed(1)}m` : '—'}（限值 {result.rulesSnapshot.maxTravelDistanceM}m） · 规则 {result.rulesSnapshot.buildingKind} v{result.rulesSnapshot.version}
+              </span>
+              <span>
+                {floor.underlay
+                  ? `底图比例 ${floor.underlay.scaleMmPerPx.toFixed(2)} mm/px（${result.items.some((i) => i.type === 'SCALE_MISMATCH') ? '比例互校失准!' : '互校合格'}）｜`
+                  : ''}
+                依据文号：{result.rulesSnapshot.source} ｜ 校验时间：{new Date(result.checkedAt).toLocaleString('zh-CN')}
+              </span>
             </>
           ) : (
             <span>尚未校验（在编辑器中打开本层即自动校验）</span>

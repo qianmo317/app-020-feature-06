@@ -3,18 +3,22 @@ import type {
   Building,
   BuildingKind,
   CheckRecord,
+  ContentPolicy,
   Facility,
   FacilityKind,
   Floor,
   Pt,
+  RefLine,
   Room,
   RoomUsage,
   RuleSet,
+  Underlay,
   ValidationResult,
 } from '../model';
 import { DEFAULT_RULES } from '../rules/defaults';
 import { nextCode, uid } from './id';
 import { polyAreaM2 } from '../lib/geometry';
+import { rescaleMmPoint, oldScaleValid } from '../lib/calibration';
 
 const STORAGE_KEY = 'fem.v1';
 
@@ -33,6 +37,14 @@ function loadState(): AppState {
       const s = JSON.parse(raw) as Partial<AppState>;
       // 缺失的节用默认值补齐（如旧版本数据没有 rules/marks），而不是整体丢弃用户数据
       if (s && Array.isArray(s.buildings) && s.floors) {
+        for (const f of Object.values(s.floors)) {
+          // 损坏的单条底图（如比例为 0）不应让整个编辑器崩掉：丢弃底图，保留房间/设施数据
+          if (f?.underlay && !(Number.isFinite(f.underlay.scaleMmPerPx) && f.underlay.scaleMmPerPx > 0)) {
+            f.underlay = undefined;
+          } else if (f?.underlay) {
+            f.underlay = normalizeUnderlay(f.underlay);
+          }
+        }
         return {
           buildings: s.buildings,
           floors: s.floors,
@@ -45,6 +57,17 @@ function loadState(): AppState {
     /* 损坏则重新开始 */
   }
   return { buildings: [], floors: {}, rules: structuredClone(DEFAULT_RULES), marks: {} };
+}
+
+/** 旧版本底图数据补齐互校字段：默认「保持原样」，与旧行为一致 */
+export function normalizeUnderlay(u: Underlay): Underlay {
+  return {
+    ...u,
+    refLines: u.refLines ?? [],
+    areaCalibs: u.areaCalibs ?? [],
+    contentPolicy: u.contentPolicy ?? 'keep',
+    scaleBasis: u.scaleBasis ?? 'manual',
+  };
 }
 
 let state: AppState = loadState();
@@ -267,7 +290,126 @@ export function deleteCheck(floorId: string, facilityId: string, index: number) 
 
 export function setUnderlay(floorId: string, underlay: Floor['underlay']) {
   updateFloor(floorId, (f) => {
-    f.underlay = underlay;
+    // 补齐字段（导入时不必在调用方写全互校字段）
+    f.underlay = underlay ? normalizeUnderlay(underlay) : undefined;
+  });
+}
+
+/** 改透明度/可见性/偏移等非比例属性（不触发校验重算） */
+export function updateUnderlay(floorId: string, patch: Partial<Underlay>) {
+  updateFloor(floorId, (f) => {
+    if (f.underlay) f.underlay = { ...f.underlay, ...patch };
+  });
+}
+
+/**
+ * 改底图比例（mm/px）。按 underlay.contentPolicy 决定已描内容如何处理：
+ * - 'rescale'：房间多边形与设施坐标以底图左上角为不动点跟着缩放，面积重新计算；
+ * - 'keep'：毫米坐标一律不动，仅底图显示尺寸变化（旧行为）。
+ * 两种方式都 bump version——比例变化会影响全部距离/面积校验结果。
+ */
+export function setUnderlayScale(
+  floorId: string,
+  scaleMmPerPx: number,
+  basis: Underlay['scaleBasis'],
+  basisDetail?: string,
+) {
+  updateFloor(floorId, (f) => {
+    const u = f.underlay;
+    if (!u || !(scaleMmPerPx > 0) || !oldScaleValid(u.scaleMmPerPx)) return;
+    if (u.contentPolicy === 'rescale') {
+      applyContentRescale(f, u, scaleMmPerPx);
+    }
+    f.underlay = { ...f.underlay!, scaleMmPerPx, scaleBasis: basis, scaleBasisDetail: basisDetail };
+    f.version++;
+  });
+}
+
+/** 切换「改比例时已描内容怎么办」的策略（仅声明，不立即变换坐标） */
+export function setContentPolicy(floorId: string, policy: ContentPolicy) {
+  updateFloor(floorId, (f) => {
+    if (!f.underlay || f.underlay.contentPolicy === policy) return;
+    f.underlay = { ...f.underlay, contentPolicy: policy };
+    f.version++;
+  });
+}
+
+/**
+ * 立即对已描内容执行一次重算（策略为 keep 时，用户仍可点「立即重算已有图形」）：
+ * 以底图左上角为不动点把房间/设施按比例缩放。
+ */
+export function rescaleFloorContent(floorId: string, newScale: number) {
+  updateFloor(floorId, (f) => {
+    const u = f.underlay;
+    if (!u || !(newScale > 0) || !oldScaleValid(u.scaleMmPerPx)) return;
+    applyContentRescale(f, u, newScale);
+    f.underlay = { ...f.underlay!, scaleMmPerPx: newScale };
+    f.version++;
+  });
+}
+
+function applyContentRescale(f: Floor, u: Underlay, newScale: number) {
+  for (const r of f.rooms) {
+    r.polygon = r.polygon.map((p) => rescaleMmPoint(p, u, newScale));
+    r.areaM2 = polyAreaM2(r.polygon);
+  }
+  for (const fac of f.facilities) {
+    const p = rescaleMmPoint({ x: fac.x, y: fac.y }, u, newScale);
+    fac.x = p.x;
+    fac.y = p.y;
+  }
+}
+
+// ---------- 底图互校：参照线 / 面积反校 ----------
+
+export function addRefLine(floorId: string, line: Omit<RefLine, 'id'>): string {
+  const id = uid();
+  updateFloor(floorId, (f) => {
+    if (!f.underlay) return;
+    f.underlay = { ...f.underlay, refLines: [...f.underlay.refLines, { ...line, id }] };
+    f.version++;
+  });
+  return id;
+}
+
+export function updateRefLine(floorId: string, lineId: string, patch: Partial<Omit<RefLine, 'id'>>) {
+  updateFloor(floorId, (f) => {
+    const u = f.underlay;
+    if (!u) return;
+    f.underlay = {
+      ...u,
+      refLines: u.refLines.map((l) => (l.id === lineId ? { ...l, ...patch } : l)),
+    };
+    f.version++;
+  });
+}
+
+export function deleteRefLine(floorId: string, lineId: string) {
+  updateFloor(floorId, (f) => {
+    const u = f.underlay;
+    if (!u) return;
+    f.underlay = { ...u, refLines: u.refLines.filter((l) => l.id !== lineId) };
+    f.version++;
+  });
+}
+
+/** 增加/更新某房间的面积反校（一个房间一条），不自动改比例，只进入互校提示 */
+export function setAreaCalib(floorId: string, roomId: string, realM2: number) {
+  updateFloor(floorId, (f) => {
+    const u = f.underlay;
+    if (!u || !(realM2 > 0)) return;
+    const rest = u.areaCalibs.filter((c) => c.roomId !== roomId);
+    f.underlay = { ...u, areaCalibs: [...rest, { roomId, realM2 }] };
+    f.version++;
+  });
+}
+
+export function deleteAreaCalib(floorId: string, roomId: string) {
+  updateFloor(floorId, (f) => {
+    const u = f.underlay;
+    if (!u) return;
+    f.underlay = { ...u, areaCalibs: u.areaCalibs.filter((c) => c.roomId !== roomId) };
+    f.version++;
   });
 }
 

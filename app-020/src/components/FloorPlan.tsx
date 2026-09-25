@@ -1,8 +1,9 @@
 import { memo, type PointerEvent as RPointerEvent, type WheelEvent as RWheelEvent } from 'react';
 import type { FacilityKind, Floor, Facility, Pt, Room } from '../model';
 import { USAGE_FILLS, FacilityGlyph } from './symbols';
+import { pxToMm, refLineMmLen } from '../lib/calibration';
 
-export type Tool = 'select' | 'pan' | 'room' | 'corridor' | FacilityKind;
+export type Tool = 'select' | 'pan' | 'room' | 'corridor' | 'calib-line' | FacilityKind;
 export type Selection = { type: 'room' | 'facility'; id: string } | null;
 export type View = { cx: number; cy: number; zoom: number }; // zoom: px per mm
 
@@ -113,6 +114,10 @@ export type FloorPlanProps = {
   coverageCells: Pt[] | null;
   highlight: Pt | null;
   markPt: Pt | null;
+  /** 编辑器：显示参照线互校图层（打印页不显示） */
+  showCalib?: boolean;
+  /** 正在拉的参照线（mm 坐标，含未确认的橡皮条终点） */
+  calibDraft?: { a: Pt; b: Pt | null } | null;
   onRoomPointerDown?: (e: RPointerEvent<SVGGElement>, room: Room) => void;
   onFacilityPointerDown?: (e: RPointerEvent<SVGGElement>, fac: Facility) => void;
   onMarkPointerDown?: (e: RPointerEvent<SVGGElement>) => void;
@@ -123,7 +128,7 @@ export function FloorPlan(props: FloorPlanProps) {
   const {
     floor, view, svgRef, underlayUrl, showGrid = true,
     selected, drag, dragDelta, draftPoints, draftCursor,
-    coverageCells, highlight, markPt,
+    coverageCells, highlight, markPt, showCalib = false, calibDraft = null,
     onRoomPointerDown, onFacilityPointerDown, onMarkPointerDown,
   } = props;
   void svgRef;
@@ -198,6 +203,48 @@ export function FloorPlan(props: FloorPlanProps) {
           {draftPoints.map((p, i) => (
             <circle key={i} cx={p.x} cy={p.y} r={i === 0 ? 350 : 200} fill="#1976d2" />
           ))}
+        </g>
+      )}
+      {showCalib && floor.underlay && (
+        <g>
+          {floor.underlay.refLines.map((l) => {
+            const a = pxToMm(l.a, floor.underlay!);
+            const b = pxToMm(l.b, floor.underlay!);
+            const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+            const shownM = refLineMmLen(l, floor.underlay!) / 1000;
+            const realM = l.realMm / 1000;
+            const off = Math.abs(shownM / realM - 1);
+            const bad = off > 0.03;
+            const color = bad ? '#e53935' : '#ef6c00';
+            return (
+              <g key={l.id} pointerEvents="none">
+                <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke={color} strokeWidth={3} vectorEffect="non-scaling-stroke" />
+                <circle cx={a.x} cy={a.y} r={250} fill={color} />
+                <circle cx={b.x} cy={b.y} r={250} fill={color} />
+                <g transform={`translate(${mid.x},${mid.y})`}>
+                  <rect x={-2600} y={-900} width={5200} height={1100} rx={200} fill="#fff" opacity={0.88} stroke={color} strokeWidth={1.5} />
+                  <text textAnchor="middle" y={-150} fontSize={480} fontWeight="bold" fill={color}>
+                    实 {realM.toFixed(2)}m · 图 {shownM.toFixed(2)}m
+                  </text>
+                  <text textAnchor="middle" y={350} fontSize={380} fill={bad ? '#e53935' : '#888'}>
+                    {bad ? `偏差 ${((shownM / realM - 1) * 100).toFixed(1)}%` : '在 ±3% 内'}
+                  </text>
+                </g>
+              </g>
+            );
+          })}
+          {calibDraft && (
+            <g pointerEvents="none">
+              {calibDraft.b && (
+                <line
+                  x1={calibDraft.a.x} y1={calibDraft.a.y}
+                  x2={calibDraft.b.x} y2={calibDraft.b.y}
+                  stroke="#ef6c00" strokeWidth={3} strokeDasharray="10 6" vectorEffect="non-scaling-stroke"
+                />
+              )}
+              <circle cx={calibDraft.a.x} cy={calibDraft.a.y} r={300} fill="#ef6c00" />
+            </g>
+          )}
         </g>
       )}
       {highlight && (

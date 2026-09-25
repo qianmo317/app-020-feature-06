@@ -25,7 +25,7 @@
 4. **自动校验**（编辑后 500ms 防抖重算，不需要点按钮）：疏散最远距离、袋形走道死端、灭火器未覆盖面积、安全出口数量与连通性、房间无门、检查记录过期/缺失/损坏。
 5. **规则可配**：`#/rules` 按建筑类别改限值（疏散距离、袋形走道、灭火器半径、需两个出口的最小面积与人数、依据文号），改一次版本号 +1，此后校验结果记录当时快照。
 6. **出图与台账**：A4/A3 横纵四种规格的白底图纸（图例、比例尺、指北针、「您在此」标记），打印 / 另存 PDF、导出 PNG、导出 CSV；整改清单列全部不合规项。
-7. **底图与照片**：导入平面图片（长边压缩到 1600、JPEG 0.85）存 IndexedDB，可调不透明度与 mm/px 比例；检查记录可附现场照片。
+7. **底图与照片 / 比例双向互校**：导入平面图片（长边压缩到 1600、JPEG 0.85）存 IndexedDB，可调不透明度。mm/px 比例不再只能手填——可在图上拉**参照线**、填真实长度反算（正校，参照线存底图像素坐标，改比例/偏移后仍钉在图上同一位置），也可挑一个已描房间填真实**面积反推**（反校，面积按比例平方换算）；任一项与当前比例偏差 >3% 即红色横幅 + 校验 `SCALE_MISMATCH` 不合规。比例来源（导入估算/手工/参照线/面积）与「改比例时已有图形：跟着重算 / 保持原样」的策略常驻显示；选「跟着重算」时房间多边形与设施以底图左上角为不动点随比例缩放、面积重算。检查记录可附现场照片。
 8. **本地持久化**：结构数据存 localStorage（键 `fem.v1`），底图与照片存 IndexedDB（库 `fem-blobs`）；内置「载入示例」一键生成示例楼层。
 
 ## 5. 进阶功能
@@ -62,6 +62,8 @@ type CheckRecord = { date: string; status: 'ok'|'low_pressure'|'expired'|'damage
 type Floor = { id: string; buildingId: string; level: number; scaleMmPerUnit: number;
                rooms: Room[]; facilities: Facility[]; exits: string[];
                underlay?: Underlay; version: number; lastValidation?: ValidationResult };
+// Underlay 互校字段：refLines（端点存底图像素坐标+真实mm）、areaCalibs（roomId+真实㎡）、
+// contentPolicy: 'rescale'|'keep'（改比例时已有图形跟着重算/保持原样）、scaleBasis（比例来源）
 type RuleSet = { buildingKind: BuildingKind; maxTravelDistanceM: number; deadEndDistanceM: number;
                  extinguisherRadiusM: number; exitMinAreaM2: number; exitMaxOccupants: number;
                  source: string; version: number };

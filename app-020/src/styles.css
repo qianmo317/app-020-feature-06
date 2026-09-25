@@ -112,6 +112,38 @@ input, select {
 }
 .canvas { flex: 1; background: #fdfdfd; touch-action: none; outline: none; display: block; width: 100%; height: 100%; }
 
+/* 底图比例互校 */
+.basis-badge {
+  font-size: 12px; padding: 2px 8px; border-radius: 4px;
+  background: #eef3fb; color: #33619e;
+}
+.basis-badge.ok { background: #e5f3e6; color: var(--green); }
+.basis-badge.bad { background: #fdecec; color: var(--red); font-weight: 600; }
+.scale-alert {
+  flex: none; display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 8px 12px; background: #fdecec; color: var(--red);
+  border-bottom: 2px solid var(--red); font-size: 13px;
+}
+.scale-alert b { font-weight: 700; }
+.scale-alert-item {
+  background: #fff; border: 1px solid #e6b0b0; border-radius: 4px; padding: 1px 8px;
+}
+.scale-alert button.on { white-space: nowrap; }
+.scale-alert .hint { color: #b71c1c; margin: 0; }
+.scale-box { border: 1px solid var(--line); border-radius: 8px; padding: 8px; background: #fafbfc; }
+.scale-box h5, .calib-box h5 { margin: 0 0 4px; font-size: 12px; color: var(--ink); }
+.policy label { font-weight: 400; }
+.calib-box { border: 1px solid #f0d8b8; border-radius: 8px; padding: 8px; background: #fffaf2; }
+.calibrow {
+  display: flex; align-items: center; justify-content: space-between; gap: 6px;
+  font-size: 12px; padding: 4px 6px; border-radius: 6px; margin-top: 4px;
+  border: 1px solid var(--line); background: #fff;
+}
+.calibrow.bad { border-color: var(--red); background: #fdecec; color: var(--red); }
+.calibrow.ok { border-color: #b7d8b9; }
+.calib-summary.bad { color: var(--red); font-weight: 600; }
+.calib-summary.good { color: var(--green); }
+
 /* 校验面板 */
 .validation .verdict { padding: 8px 10px; border-radius: 8px; font-weight: 600; margin-bottom: 8px; }
 .validation .verdict.pass { background: #e5f3e6; color: var(--green); }

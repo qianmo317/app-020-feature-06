@@ -16,6 +16,7 @@ import {
   doorCandidates,
   bboxOf,
 } from './geometry';
+import { failingScaleChecks, formatDeviation, scaleChecks } from './calibration';
 import { buildCorridorGraph, type DoorInput } from './graph';
 import { CHECK_INTERVAL_DAYS, OCCUPANCY_DENSITY_M2_PER_PERSON } from '../rules/defaults';
 
@@ -180,6 +181,29 @@ export function checkDueInfo(facility: { kind: FacilityKind; checks: { date: str
  */
 export function validateFloor(floor: Floor, rules: RuleSet, now: number = Date.now()): ValidationResult {
   const items: ValidationItem[] = [];
+
+  // 底图比例双向互校：参照线/房间面积反推的 mm/px 与当前值偏差 >3% 即判不合规。
+  // 比例是一切距离/面积的源头，失准会让整张图系统性放大或缩小，故按 error 处理。
+  if (floor.underlay) {
+    const roomById = new Map(floor.rooms.map((r) => [r.id, r]));
+    const bad = failingScaleChecks(scaleChecks(floor.underlay, roomById));
+    for (const c of bad) {
+      const hint =
+        c.deviation > 0
+          ? `底图被放大了：实际 ${formatDeviation(c.deviation)}，照此描出的面积/距离系统性偏小`
+          : `底图被缩小了：实际 ${formatDeviation(c.deviation)}，照此描出的面积/距离系统性偏大`;
+      items.push({
+        severity: 'error',
+        type: 'SCALE_MISMATCH',
+        roomId: c.kind === 'area' ? c.id : undefined,
+        point: c.point,
+        value: c.expectedScale,
+        limit: floor.underlay.scaleMmPerPx,
+        message: `底图比例失准：${c.name}反推 ${c.expectedScale.toFixed(2)} mm/px，当前为 ${floor.underlay.scaleMmPerPx.toFixed(2)}（偏差 ${formatDeviation(c.deviation)}，限值 ±3%）。${hint}`,
+      });
+    }
+  }
+
   const corridorRooms = floor.rooms.filter((r) => r.usage === 'corridor');
   const openPlan = corridorRooms.length === 0;
   const walkPolys = openPlan ? floor.rooms.map((r) => r.polygon) : corridorRooms.map((r) => r.polygon);
