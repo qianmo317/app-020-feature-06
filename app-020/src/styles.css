@@ -137,6 +137,18 @@ input, select {
 .checkrow { display: flex; align-items: center; gap: 6px; font-size: 12px; padding: 3px 0; border-bottom: 1px dashed var(--line); }
 .thumb { width: 44px; height: 33px; object-fit: cover; border-radius: 4px; border: 1px solid var(--line); }
 
+/* 底图比例校核 */
+.calib { border-top: 1px dashed var(--line); padding-top: 8px; margin-top: 2px; display: flex; flex-direction: column; gap: 6px; }
+.calib h5 { margin: 0; font-size: 12px; color: var(--muted); }
+.calibrow { display: flex; gap: 6px; align-items: center; }
+.calibrow select { flex: 1; min-width: 0; font-size: 12px; }
+.calibline { display: flex; align-items: center; gap: 6px; font-size: 12px; margin: 0; flex-wrap: wrap; }
+.calibline button { font-size: 11px; padding: 1px 8px; }
+.calib-warn {
+  background: #fdecec; color: var(--red); border: 1px solid #e6b0b0;
+  border-radius: 8px; padding: 6px 8px; font-size: 12px; font-weight: 600; margin: 0;
+}
+
 /* 竖向疏散 */
 .exitrow { display: flex; align-items: center; gap: 10px; margin: 8px 0; }
 .exitlabel { width: 40px; font-weight: 600; text-align: right; }

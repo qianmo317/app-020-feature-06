@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Facility, Pt, Room, RoomUsage } from '../model';
 import { USAGE_LABELS, FACILITY_LABELS } from '../model';
-import { addRoom, addFacility, deleteFacility, deleteRoom, moveFacility, moveRoom, updateRoom, updateFacility, setUnderlay, setLastValidation, useStore, addCheck, deleteCheck } from '../store/store';
+import { addRoom, addFacility, deleteFacility, deleteRoom, moveFacility, moveRoom, updateRoom, updateFacility, setUnderlay, applyUnderlayScale, setLastValidation, useStore, addCheck, deleteCheck } from '../store/store';
 import { floorLabel } from '../store/id';
 import { getBlob, putBlob, compressImage } from '../store/db';
 import { uid } from '../store/id';
 import { bboxOf } from '../lib/geometry';
+import { SCALE_WARN_THRESHOLD, scaleDeviation, scaleFromArea, scaleFromRefLine } from '../lib/scale';
 import { computeCoverage, validateFloor } from '../lib/engine';
 import { FloorPlan, mmFromEvent, wheelZoom, type DragState, type Selection, type Tool, type View } from '../components/FloorPlan';
 import { FacilityGlyph, USAGE_FILLS } from '../components/symbols';
@@ -39,6 +40,11 @@ export function FloorEditor({ floorId }: Props) {
   const [highlight, setHighlight] = useState<Pt | null>(null);
   const [underlayUrl, setUnderlayUrl] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // 参照线绘制：第一个端点 + 跟随光标的预览点（不吸附，尽量对准底图特征）
+  const [refA, setRefA] = useState<Pt | null>(null);
+  const [refCursor, setRefCursor] = useState<Pt | null>(null);
+  // 比例输入框为提交式（blur/Enter 生效）：跟随重算模式下，输入中间态不能触发几何缩放
+  const [scaleInput, setScaleInput] = useState<string | null>(null);
   const svgRef = useRef<SVGSVGElement | null>(null);
   const fileRef = useRef<HTMLInputElement | null>(null);
 
@@ -81,7 +87,10 @@ export function FloorEditor({ floorId }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [floorId, floor?.rooms.length === 0]);
 
-  // 自动校验（防抖）
+  // 自动校验（防抖）。底图校核字段（比例/参照线/面积校核）也参与触发：
+  // setUnderlay 不加楼层版本，但校核结果会影响 UNDERLAY_SCALE_MISMATCH 校验项
+  const u = floor?.underlay;
+  const calibKey = `${u?.scaleMmPerPx ?? ''}|${JSON.stringify(u?.refLine ?? null)}|${JSON.stringify(u?.areaCheck ?? null)}`;
   useEffect(() => {
     if (!floor || !rules) return;
     setBusy(true);
@@ -95,7 +104,7 @@ export function FloorEditor({ floorId }: Props) {
     }, 500);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [floorId, floor?.version, rulesVersion]);
+  }, [floorId, floor?.version, rulesVersion, calibKey]);
 
   if (!floor || !rules) {
     return <div className="page">楼层不存在。<Link to="/">返回首页</Link></div>;
@@ -143,6 +152,7 @@ export function FloorEditor({ floorId }: Props) {
   const onPointerMove = (e: React.PointerEvent<SVGSVGElement>) => {
     const p = toMm(e);
     if (tool === 'room' || tool === 'corridor') setDraftCursor({ x: snap(p.x), y: snap(p.y) });
+    if (tool === 'scale_ref' && refA) setRefCursor(p);
     if (!drag) return;
     if (drag.kind === 'pan') {
       const o = drag.orig as { cx: number; cy: number };
@@ -162,6 +172,26 @@ export function FloorEditor({ floorId }: Props) {
       // 绘制/放置点击
       const p = toMm(e);
       const sp = { x: snap(p.x), y: snap(p.y) };
+      if (tool === 'scale_ref') {
+        // pointerleave 也会进这个 handler，画参照线时不响应（避免误落点）
+        if (e.type !== 'pointerup') return;
+        if (!refA) {
+          setRefA(p);
+          setRefCursor(p);
+        } else {
+          // 两端点太近视为误触，不生成参照线
+          if (Math.hypot(p.x - refA.x, p.y - refA.y) > 50 && floor.underlay) {
+            setUnderlay(floorId, {
+              ...floor.underlay,
+              refLine: { ax: refA.x, ay: refA.y, bx: p.x, by: p.y, realLengthM: floor.underlay.refLine?.realLengthM ?? 0 },
+            });
+          }
+          setRefA(null);
+          setRefCursor(null);
+          setTool('select');
+        }
+        return;
+      }
       if (tool === 'room' || tool === 'corridor') {
         // 双击起点附近闭合
         if (draftPoints.length >= 3 && Math.hypot(sp.x - draftPoints[0].x, sp.y - draftPoints[0].y) < 600) {
@@ -203,6 +233,8 @@ export function FloorEditor({ floorId }: Props) {
     if (e.key === 'Escape') {
       setDraftPoints([]);
       setDraftCursor(null);
+      setRefA(null);
+      setRefCursor(null);
     }
     if ((e.key === 'Delete' || e.key === 'Backspace') && selected) {
       if (selected.type === 'room') deleteRoom(floorId, selected.id);
@@ -253,7 +285,37 @@ export function FloorEditor({ floorId }: Props) {
       scaleMmPerPx: scale,
       opacity: 0.5,
       visible: true,
+      rescalePolicy: 'keep',
     });
+  };
+
+  // ---------- 底图比例校核（双向） ----------
+  const underlay = floor.underlay;
+  const policy = underlay?.rescalePolicy ?? 'keep';
+  const refLine = underlay?.refLine;
+  const refLineMm = refLine ? Math.hypot(refLine.bx - refLine.ax, refLine.by - refLine.ay) : 0;
+  // 参照线反算 / 面积反推：两个相互独立的比例来源
+  const lineScale = underlay && refLine
+    ? scaleFromRefLine({ x: refLine.ax, y: refLine.ay }, { x: refLine.bx, y: refLine.by }, refLine.realLengthM, underlay.scaleMmPerPx)
+    : null;
+  const acRoom = underlay?.areaCheck ? floor.rooms.find((r) => r.id === underlay.areaCheck!.roomId) : undefined;
+  const areaScale = underlay?.areaCheck && acRoom
+    ? scaleFromArea(acRoom.areaM2, underlay.areaCheck.realAreaM2, underlay.scaleMmPerPx)
+    : null;
+  const crossDev = lineScale != null && areaScale != null ? scaleDeviation(lineScale, areaScale) : null;
+  const pctText = (d: number) => `${(d * 100).toFixed(1)}%`;
+  // 反算应用后比例可能是长浮点，显示时收拢到 4 位有效小数
+  const fmtScale = (v: number) => String(Number(v.toFixed(4)));
+
+  const commitScaleInput = () => {
+    if (scaleInput == null || !underlay) return;
+    const v = Number(scaleInput);
+    if (Number.isFinite(v) && v > 0) applyUnderlayScale(floorId, v);
+    setScaleInput(null);
+  };
+
+  const patchUnderlay = (patch: Partial<NonNullable<typeof underlay>>) => {
+    if (underlay) setUnderlay(floorId, { ...underlay, ...patch });
   };
 
   const selRoom: Room | undefined = selected?.type === 'room' ? floor.rooms.find((r) => r.id === selected.id) : undefined;
@@ -285,7 +347,13 @@ export function FloorEditor({ floorId }: Props) {
               ))}
             </div>
           )}
-          <p className="hint">{tool === 'room' || tool === 'corridor' ? '点击落点，Enter/双击起点闭合，Esc 取消' : '滚轮缩放，拖动空白处平移'}</p>
+          <p className="hint">
+            {tool === 'room' || tool === 'corridor'
+              ? '点击落点，Enter/双击起点闭合，Esc 取消'
+              : tool === 'scale_ref'
+                ? '在底图上点击已知长度物体的两个端点，Esc 取消'
+                : '滚轮缩放，拖动空白处平移'}
+          </p>
         </section>
         <section>
           <h4>设施</h4>
@@ -302,13 +370,13 @@ export function FloorEditor({ floorId }: Props) {
           <h4>底图</h4>
           <input ref={fileRef} type="file" accept="image/*" hidden onChange={(e) => e.target.files?.[0] && importUnderlay(e.target.files[0])} />
           <button onClick={() => fileRef.current?.click()}>导入底图图片</button>
-          {floor.underlay && (
+          {underlay && (
             <div className="stack">
               <label className="row">
                 <input
                   type="checkbox"
-                  checked={floor.underlay.visible}
-                  onChange={(e) => floor.underlay && setUnderlay(floorId, { ...floor.underlay, visible: e.target.checked })}
+                  checked={underlay.visible}
+                  onChange={(e) => patchUnderlay({ visible: e.target.checked })}
                 />
                 显示底图
               </label>
@@ -316,18 +384,117 @@ export function FloorEditor({ floorId }: Props) {
                 不透明度
                 <input
                   type="range" min={0.05} max={1} step={0.05}
-                  value={floor.underlay.opacity}
-                  onChange={(e) => floor.underlay && setUnderlay(floorId, { ...floor.underlay, opacity: Number(e.target.value) })}
+                  value={underlay.opacity}
+                  onChange={(e) => patchUnderlay({ opacity: Number(e.target.value) })}
                 />
               </label>
               <label className="row">
                 比例 (mm/px)
                 <input
-                  type="number" min={0.5} step={0.5} style={{ width: 70 }}
-                  value={floor.underlay.scaleMmPerPx}
-                  onChange={(e) => floor.underlay && setUnderlay(floorId, { ...floor.underlay, scaleMmPerPx: Math.max(0.1, Number(e.target.value)) })}
+                  type="number" min={0.1} step={0.1} style={{ width: 70 }}
+                  value={scaleInput ?? fmtScale(underlay.scaleMmPerPx)}
+                  onFocus={() => setScaleInput(fmtScale(underlay.scaleMmPerPx))}
+                  onChange={(e) => setScaleInput(e.target.value)}
+                  onBlur={commitScaleInput}
+                  onKeyDown={(e) => { if (e.key === 'Enter') commitScaleInput(); }}
                 />
               </label>
+              <span className="row">改比例时已有图形：</span>
+              <label className="row">
+                <input type="radio" name="rescalePolicy" checked={policy === 'keep'} onChange={() => patchUnderlay({ rescalePolicy: 'keep' })} />
+                保持原样（仅底图缩放）
+              </label>
+              <label className="row">
+                <input type="radio" name="rescalePolicy" checked={policy === 'follow'} onChange={() => patchUnderlay({ rescalePolicy: 'follow' })} />
+                跟着重算（图形随底图缩放）
+              </label>
+              <p className="hint">
+                当前：{policy === 'follow'
+                  ? '跟着重算 —— 修改比例会同步缩放全部房间、设施坐标，面积与疏散距离随之更新'
+                  : '保持原样 —— 修改比例只改变底图显示，已描好的房间与设施不动'}
+              </p>
+
+              <div className="calib">
+                <h5>比例校核（双向互校）</h5>
+                <div className="calibrow">
+                  <button
+                    className={tool === 'scale_ref' ? 'on' : ''}
+                    onClick={() => { setTool('scale_ref'); setRefA(null); setRefCursor(null); setDraftPoints([]); }}
+                  >
+                    {refLine ? '重画参照线' : '画参照线'}
+                  </button>
+                  {refLine && (
+                    <button className="ghost" onClick={() => patchUnderlay({ refLine: undefined })}>清除</button>
+                  )}
+                </div>
+                {refLine && (
+                  <>
+                    <label className="row">
+                      参照线真实长度 (m)
+                      <input
+                        type="number" min={0} step={0.1} style={{ width: 70 }}
+                        value={refLine.realLengthM || ''}
+                        placeholder="如 10"
+                        onChange={(e) => patchUnderlay({ refLine: { ...refLine, realLengthM: Number(e.target.value) } })}
+                      />
+                    </label>
+                    <p className="hint">图上量得 {(refLineMm / 1000).toFixed(2)}m</p>
+                    {lineScale != null && underlay && (
+                      <p className={`calibline ${scaleDeviation(lineScale, underlay.scaleMmPerPx) > SCALE_WARN_THRESHOLD ? 'bad' : 'good'}`}>
+                        反算 {lineScale.toFixed(2)} mm/px（与当前相差 {pctText(scaleDeviation(lineScale, underlay.scaleMmPerPx))}）
+                        <button onClick={() => applyUnderlayScale(floorId, lineScale)}>应用</button>
+                      </p>
+                    )}
+                  </>
+                )}
+                <div className="calibrow">
+                  <select
+                    value={underlay.areaCheck?.roomId ?? ''}
+                    onChange={(e) => {
+                      const roomId = e.target.value;
+                      patchUnderlay({ areaCheck: roomId ? { roomId, realAreaM2: underlay.areaCheck?.realAreaM2 ?? 0 } : undefined });
+                    }}
+                  >
+                    <option value="">面积校核：选房间…</option>
+                    {floor.rooms.map((r) => (
+                      <option key={r.id} value={r.id}>{r.name}（描出 {r.areaM2.toFixed(1)}㎡）</option>
+                    ))}
+                  </select>
+                </div>
+                {underlay.areaCheck && (
+                  acRoom ? (
+                    <>
+                      <label className="row">
+                        「{acRoom.name}」真实面积 (㎡)
+                        <input
+                          type="number" min={0} step={0.5} style={{ width: 70 }}
+                          value={underlay.areaCheck.realAreaM2 || ''}
+                          placeholder="如图纸标注"
+                          onChange={(e) => patchUnderlay({ areaCheck: { ...underlay.areaCheck!, realAreaM2: Number(e.target.value) } })}
+                        />
+                      </label>
+                      {areaScale != null && (
+                        <p className={`calibline ${scaleDeviation(areaScale, underlay.scaleMmPerPx) > SCALE_WARN_THRESHOLD ? 'bad' : 'good'}`}>
+                          反推 {areaScale.toFixed(2)} mm/px（与当前相差 {pctText(scaleDeviation(areaScale, underlay.scaleMmPerPx))}）
+                          <button onClick={() => applyUnderlayScale(floorId, areaScale)}>应用</button>
+                        </p>
+                      )}
+                    </>
+                  ) : (
+                    <p className="hint">所选房间已删除，请重新选择</p>
+                  )
+                )}
+                {crossDev != null && lineScale != null && areaScale != null && (
+                  crossDev > SCALE_WARN_THRESHOLD ? (
+                    <p className="calib-warn">
+                      ⚠ 两种校核互相矛盾：参照线 {lineScale.toFixed(2)} 与面积反推 {areaScale.toFixed(2)} mm/px 相差 {pctText(crossDev)}（&gt;3%）。
+                      面积与疏散距离可能整体偏差，请复核参照长度与房间面积。
+                    </p>
+                  ) : (
+                    <p className="hint good">✔ 两种校核一致（相差 {pctText(crossDev)}，≤3%）</p>
+                  )
+                )}
+              </div>
               <button className="ghost" onClick={() => { if (floor.underlay) setUnderlay(floorId, undefined); }}>移除底图</button>
             </div>
           )}
@@ -349,6 +516,11 @@ export function FloorEditor({ floorId }: Props) {
       <div className="canvas-wrap">
         <div className="canvas-toolbar">
           <span>{floorLabel(floor.level)} · {floor.rooms.length} 房间 · {floor.facilities.length} 设施</span>
+          {underlay && (
+            <span className="hint">
+              底图 {fmtScale(underlay.scaleMmPerPx)} mm/px · 改比例时图形{policy === 'follow' ? '跟着重算' : '保持原样'}
+            </span>
+          )}
           <button className={coverageCells ? 'on' : ''} onClick={showCoverage}>
             {coverageCells ? '隐藏未覆盖区域' : '显示未覆盖区域'}
           </button>
@@ -384,6 +556,36 @@ export function FloorEditor({ floorId }: Props) {
             onRoomPointerDown={onRoomDown}
             onFacilityPointerDown={onFacilityDown}
           />
+          {/* 比例校核参照线：已提交的 + 绘制中的预览 */}
+          {refLine && (
+            <g pointerEvents="none">
+              <line
+                x1={refLine.ax} y1={refLine.ay} x2={refLine.bx} y2={refLine.by}
+                stroke="#d81b60" strokeWidth={2.5} vectorEffect="non-scaling-stroke"
+              />
+              <circle cx={refLine.ax} cy={refLine.ay} r={300} fill="#d81b60" />
+              <circle cx={refLine.bx} cy={refLine.by} r={300} fill="#d81b60" />
+              <text
+                x={(refLine.ax + refLine.bx) / 2}
+                y={(refLine.ay + refLine.by) / 2 - 500}
+                textAnchor="middle" fontSize={380} fill="#d81b60"
+                style={{ userSelect: 'none' }}
+              >
+                参照线 {refLine.realLengthM > 0 ? `${refLine.realLengthM}m` : '（待填真实长度）'}
+              </text>
+            </g>
+          )}
+          {tool === 'scale_ref' && refA && (
+            <g pointerEvents="none">
+              <circle cx={refA.x} cy={refA.y} r={300} fill="#d81b60" />
+              {refCursor && (
+                <line
+                  x1={refA.x} y1={refA.y} x2={refCursor.x} y2={refCursor.y}
+                  stroke="#d81b60" strokeWidth={2} strokeDasharray="8 6" vectorEffect="non-scaling-stroke"
+                />
+              )}
+            </g>
+          )}
         </svg>
       </div>
 

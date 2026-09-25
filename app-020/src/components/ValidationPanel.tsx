@@ -11,6 +11,7 @@ const TYPE_LABELS: Record<string, string> = {
   CHECK_MISSING: '缺检查记录',
   FACILITY_DEFECT: '设施缺陷',
   NO_DOOR: '房间无门',
+  UNDERLAY_SCALE_MISMATCH: '底图比例校核',
 };
 
 type Props = {

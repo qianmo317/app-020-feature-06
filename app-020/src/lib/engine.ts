@@ -18,6 +18,7 @@ import {
 } from './geometry';
 import { buildCorridorGraph, type DoorInput } from './graph';
 import { CHECK_INTERVAL_DAYS, OCCUPANCY_DENSITY_M2_PER_PERSON } from '../rules/defaults';
+import { SCALE_WARN_THRESHOLD, scaleDeviation, scaleFromArea, scaleFromRefLine } from './scale';
 
 const TRAVEL_STEP_MM = 250; // 走道栅格 0.25m，保证与手工沿路径测量误差 < 0.5m
 const ROOM_STEP_MM = 500; // 房间内部采样 0.5m
@@ -332,6 +333,52 @@ export function validateFloor(floor: Floor, rules: RuleSet, now: number = Date.n
       limit: required,
       message: `安全出口 ${exits.length} 个，少于要求数量（面积 ${areaM2.toFixed(0)}㎡ / 人数约 ${occupants} → 需 ≥ ${required} 个）`,
     });
+  }
+
+  // 底图比例校核：参照线与房间面积是两个独立来源，互相矛盾（>3%）说明比例可能整体错误，
+  // 描出的面积与疏散距离都会跟着错；只有一个来源时则与当前比例对比。
+  const u = floor.underlay;
+  if (u && u.scaleMmPerPx > 0) {
+    const ref = u.refLine;
+    const lineScale = ref
+      ? scaleFromRefLine({ x: ref.ax, y: ref.ay }, { x: ref.bx, y: ref.by }, ref.realLengthM, u.scaleMmPerPx)
+      : null;
+    const acRoom = u.areaCheck ? floor.rooms.find((r) => r.id === u.areaCheck!.roomId) : undefined;
+    const areaScale = u.areaCheck && acRoom ? scaleFromArea(polyAreaM2(acRoom.polygon), u.areaCheck.realAreaM2, u.scaleMmPerPx) : null;
+    const pct = SCALE_WARN_THRESHOLD * 100;
+    const pushScaleItem = (message: string, dev: number, point?: Pt) => {
+      items.push({ severity: 'warning', type: 'UNDERLAY_SCALE_MISMATCH', message, value: dev * 100, limit: pct, point });
+    };
+    if (lineScale != null && areaScale != null && acRoom) {
+      const dev = scaleDeviation(lineScale, areaScale);
+      if (dev > SCALE_WARN_THRESHOLD) {
+        pushScaleItem(
+          `底图比例双向校核不一致：参照线反算 ${lineScale.toFixed(2)} mm/px 与房间「${acRoom.name}」面积反推 ${areaScale.toFixed(2)} mm/px 相差 ${(dev * 100).toFixed(1)}%（>${pct}%），描图面积与疏散距离可能整体偏差，请复核底图比例`,
+          dev,
+          ref ? { x: (ref.ax + ref.bx) / 2, y: (ref.ay + ref.by) / 2 } : undefined,
+        );
+      }
+    } else if (lineScale != null) {
+      const dev = scaleDeviation(lineScale, u.scaleMmPerPx);
+      if (dev > SCALE_WARN_THRESHOLD) {
+        pushScaleItem(
+          `参照线反算比例 ${lineScale.toFixed(2)} mm/px 与当前底图比例 ${u.scaleMmPerPx.toFixed(2)} 相差 ${(dev * 100).toFixed(1)}%（>${pct}%），请复核底图比例`,
+          dev,
+          ref ? { x: (ref.ax + ref.bx) / 2, y: (ref.ay + ref.by) / 2 } : undefined,
+        );
+      }
+    } else if (areaScale != null && acRoom) {
+      const dev = scaleDeviation(areaScale, u.scaleMmPerPx);
+      if (dev > SCALE_WARN_THRESHOLD) {
+        const cx = acRoom.polygon.reduce((s, p) => s + p.x, 0) / acRoom.polygon.length;
+        const cy = acRoom.polygon.reduce((s, p) => s + p.y, 0) / acRoom.polygon.length;
+        pushScaleItem(
+          `房间「${acRoom.name}」面积反推比例 ${areaScale.toFixed(2)} mm/px 与当前底图比例 ${u.scaleMmPerPx.toFixed(2)} 相差 ${(dev * 100).toFixed(1)}%（>${pct}%），请复核底图比例`,
+          dev,
+          { x: cx, y: cy },
+        );
+      }
+    }
   }
 
   // 检查记录

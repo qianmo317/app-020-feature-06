@@ -271,6 +271,44 @@ export function setUnderlay(floorId: string, underlay: Floor['underlay']) {
   });
 }
 
+/**
+ * 修改底图比例（手动输入或校核反算后应用都走这里）。按底图的 rescalePolicy 处理已有描图几何：
+ * - 'follow'：房间多边形、设施点位、参照线、「您在此」标记随底图一起缩放
+ *   （缩放中心为底图左上角锚点，缩放后描图与底图像素的相对位置不变），
+ *   面积重算、楼层版本 +1 触发重新校验；
+ * - 'keep'（缺省）：仅改比例数值，已有几何保持原样。
+ */
+export function applyUnderlayScale(floorId: string, newScaleMmPerPx: number) {
+  setState((s) => {
+    const f = s.floors[floorId];
+    const u = f?.underlay;
+    if (!f || !u || !(newScaleMmPerPx > 0) || newScaleMmPerPx === u.scaleMmPerPx) return;
+    if (u.rescalePolicy === 'follow' && u.scaleMmPerPx > 0) {
+      const k = newScaleMmPerPx / u.scaleMmPerPx;
+      const ox = u.offsetX;
+      const oy = u.offsetY;
+      const rx = (v: number) => ox + (v - ox) * k;
+      const ry = (v: number) => oy + (v - oy) * k;
+      for (const r of f.rooms) {
+        r.polygon = r.polygon.map((p) => ({ x: rx(p.x), y: ry(p.y) }));
+        r.areaM2 = polyAreaM2(r.polygon);
+      }
+      for (const fac of f.facilities) {
+        fac.x = rx(fac.x);
+        fac.y = ry(fac.y);
+      }
+      if (u.refLine) {
+        u.refLine = { ...u.refLine, ax: rx(u.refLine.ax), ay: ry(u.refLine.ay), bx: rx(u.refLine.bx), by: ry(u.refLine.by) };
+      }
+      const m = s.marks[floorId];
+      if (m) s.marks[floorId] = { x: rx(m.x), y: ry(m.y) };
+      f.version++;
+    }
+    u.scaleMmPerPx = newScaleMmPerPx;
+    s.floors[floorId] = { ...f };
+  });
+}
+
 export function setMark(floorId: string, pt: Pt) {
   setState((s) => {
     s.marks[floorId] = { ...pt };

@@ -42,15 +42,36 @@ export type Facility = {
   checks: CheckRecord[];
 };
 
+/** 底图比例修改时，已有描图几何（房间/设施/参照线）的处理方式 */
+export type RescalePolicy = 'follow' | 'keep';
+
+/** 参照线校核：底图上已知真实长度的线段（端点为图纸坐标 mm），用于反算毫米每像素 */
+export type RefLine = {
+  ax: number;
+  ay: number;
+  bx: number;
+  by: number;
+  realLengthM: number; // 真实长度（m），>0 才参与校核
+};
+
+/** 面积校核：用某个已描房间的真实面积反推底图比例 */
+export type AreaCheck = {
+  roomId: string;
+  realAreaM2: number; // 真实面积（㎡），>0 才参与校核
+};
+
 export type Underlay = {
   key: string; // IndexedDB key
   wPx: number;
   hPx: number;
   offsetX: number; // mm，底图左上角在图纸坐标中的位置
   offsetY: number;
-  scaleMmPerPx: number; // 仅影响底图显示，不影响校验
+  scaleMmPerPx: number; // 底图 1 像素铺多少 mm；修改时按 rescalePolicy 决定已有几何是否跟着重算
   opacity: number; // 0~1
   visible: boolean;
+  rescalePolicy?: RescalePolicy; // 缺省 'keep'（与旧行为一致：仅底图显示变化）
+  refLine?: RefLine;
+  areaCheck?: AreaCheck;
 };
 
 export type Floor = {

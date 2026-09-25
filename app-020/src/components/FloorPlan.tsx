@@ -2,7 +2,7 @@ import { memo, type PointerEvent as RPointerEvent, type WheelEvent as RWheelEven
 import type { FacilityKind, Floor, Facility, Pt, Room } from '../model';
 import { USAGE_FILLS, FacilityGlyph } from './symbols';
 
-export type Tool = 'select' | 'pan' | 'room' | 'corridor' | FacilityKind;
+export type Tool = 'select' | 'pan' | 'room' | 'corridor' | 'scale_ref' | FacilityKind;
 export type Selection = { type: 'room' | 'facility'; id: string } | null;
 export type View = { cx: number; cy: number; zoom: number }; // zoom: px per mm
 
